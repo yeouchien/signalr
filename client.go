@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	scraper "github.com/yeouchien/go-cloudflare-scraper"
 )
 
 type negotiationResponse struct {
@@ -21,7 +22,7 @@ type negotiationResponse struct {
 	TryWebSockets           bool
 	ProtocolVersion         string
 	TransportConnectTimeout float32
-	LogPollDelay            float32
+	LongPollDelay           float32
 }
 
 type Client struct {
@@ -37,6 +38,8 @@ type Client struct {
 	responseFutures map[string]chan *serverMessage
 	mutex           sync.Mutex
 	dispatchRunning bool
+
+	transport *scraper.Transport
 }
 
 type serverMessage struct {
@@ -47,30 +50,37 @@ type serverMessage struct {
 	Error      string            `json:"E"`
 }
 
-func negotiate(scheme, address string) (negotiationResponse, error) {
+func negotiate(scheme, address string) (negotiationResponse, *scraper.Transport, error) {
 	var response negotiationResponse
 
 	var negotiationUrl = url.URL{Scheme: scheme, Host: address, Path: "/signalr/negotiate"}
 
-	client := &http.Client{}
+	transport, err := scraper.NewTransport(http.DefaultTransport)
+	if err != nil {
+		return response, nil, err
+	}
+
+	client := &http.Client{
+		Transport: transport,
+	}
 
 	reply, err := client.Get(negotiationUrl.String())
 	if err != nil {
-		return response, err
+		return response, nil, err
 	}
 
 	defer reply.Body.Close()
 
 	if body, err := ioutil.ReadAll(reply.Body); err != nil {
-		return response, err
+		return response, nil, err
 	} else if err := json.Unmarshal(body, &response); err != nil {
-		return response, err
+		return response, nil, err
 	} else {
-		return response, nil
+		return response, transport, nil
 	}
 }
 
-func connectWebsocket(address string, params negotiationResponse, hubs []string) (*websocket.Conn, error) {
+func connectWebsocket(transport *scraper.Transport, address string, params negotiationResponse, hubs []string) (*websocket.Conn, error) {
 	var connectionData = make([]struct {
 		Name string `json:"Name"`
 	}, len(hubs))
@@ -91,7 +101,13 @@ func connectWebsocket(address string, params negotiationResponse, hubs []string)
 	var connectionUrl = url.URL{Scheme: "wss", Host: address, Path: "signalr/connect"}
 	connectionUrl.RawQuery = connectionParameters.Encode()
 
-	if conn, _, err := websocket.DefaultDialer.Dial(connectionUrl.String(), nil); err != nil {
+	reqHeader := make(http.Header)
+	reqHeader["User-Agent"] = []string{scraper.UserAgent}
+
+	dialer := websocket.DefaultDialer
+	dialer.Jar = transport.Cookies
+
+	if conn, _, err := dialer.Dial(connectionUrl.String(), reqHeader); err != nil {
 		return nil, err
 	} else {
 		return conn, nil
@@ -244,14 +260,15 @@ func (self *Client) CallHub(hub, method string, params ...interface{}) (json.Raw
 
 func (self *Client) Connect(scheme, host string, hubs []string) error {
 	// Negotiate parameters.
-	if params, err := negotiate(scheme, host); err != nil {
+	params, transport, err := negotiate(scheme, host)
+	if err != nil {
 		return err
 	} else {
 		self.params = params
 	}
 
 	// Connect Websocket.
-	if ws, err := connectWebsocket(host, self.params, hubs); err != nil {
+	if ws, err := connectWebsocket(transport, host, self.params, hubs); err != nil {
 		return err
 	} else {
 		self.socket = ws
