@@ -50,18 +50,14 @@ type serverMessage struct {
 	Error      string            `json:"E"`
 }
 
-func negotiate(scheme, address string) (negotiationResponse, *scraper.Transport, error) {
+func negotiate(scheme, address string) (negotiationResponse, *http.Client, error) {
 	var response negotiationResponse
 
 	var negotiationUrl = url.URL{Scheme: scheme, Host: address, Path: "/signalr/negotiate"}
 
-	transport, err := scraper.NewTransport(http.DefaultTransport)
+	client, err := scraper.NewClient()
 	if err != nil {
 		return response, nil, err
-	}
-
-	client := &http.Client{
-		Transport: transport,
 	}
 
 	reply, err := client.Get(negotiationUrl.String())
@@ -70,17 +66,17 @@ func negotiate(scheme, address string) (negotiationResponse, *scraper.Transport,
 	}
 
 	defer reply.Body.Close()
-
-	if body, err := ioutil.ReadAll(reply.Body); err != nil {
+	body, err := ioutil.ReadAll(reply.Body)
+	if err != nil {
 		return response, nil, err
 	} else if err := json.Unmarshal(body, &response); err != nil {
 		return response, nil, err
 	} else {
-		return response, transport, nil
+		return response, client, nil
 	}
 }
 
-func connectWebsocket(transport *scraper.Transport, address string, params negotiationResponse, hubs []string) (*websocket.Conn, error) {
+func connectWebsocket(httpClient *http.Client, address string, params negotiationResponse, hubs []string) (*websocket.Conn, error) {
 	var connectionData = make([]struct {
 		Name string `json:"Name"`
 	}, len(hubs))
@@ -105,7 +101,7 @@ func connectWebsocket(transport *scraper.Transport, address string, params negot
 	reqHeader["User-Agent"] = []string{scraper.UserAgent}
 
 	dialer := websocket.DefaultDialer
-	dialer.Jar = transport.Cookies
+	dialer.Jar = httpClient.Jar
 
 	if conn, _, err := dialer.Dial(connectionUrl.String(), reqHeader); err != nil {
 		return nil, err
@@ -260,7 +256,7 @@ func (self *Client) CallHub(hub, method string, params ...interface{}) (json.Raw
 
 func (self *Client) Connect(scheme, host string, hubs []string) error {
 	// Negotiate parameters.
-	params, transport, err := negotiate(scheme, host)
+	params, httpClient, err := negotiate(scheme, host)
 	if err != nil {
 		return err
 	} else {
@@ -268,7 +264,7 @@ func (self *Client) Connect(scheme, host string, hubs []string) error {
 	}
 
 	// Connect Websocket.
-	if ws, err := connectWebsocket(transport, host, self.params, hubs); err != nil {
+	if ws, err := connectWebsocket(httpClient, host, self.params, hubs); err != nil {
 		return err
 	} else {
 		self.socket = ws
